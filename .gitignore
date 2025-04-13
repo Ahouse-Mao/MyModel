@@ -2,3 +2,15 @@
 /checkpoints
 /data_provider
 /results
+/exp/__pycache__
+/data_provider/__pycache__
+/layers/__pycache__
+/models/__pycache__
+/test
+/utils/__pycache__
+/backup
+/result.txt
+/test_results
+
+
+
