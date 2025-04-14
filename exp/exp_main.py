@@ -7,7 +7,7 @@ import torch.nn as nn
 from torch import optim
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
-from models import TPGN, iTransformer, ModernTCN, PatchTST
+from models import TPGN, iTransformer, ModernTCN, PatchTST, MTSN
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, save_to_csv
 from utils.metrics import metric
 
@@ -28,6 +28,7 @@ class Exp_Main(Exp_Basic):
             'iTransformer': iTransformer,
             'ModernTCN': ModernTCN,
             'PatchTST': PatchTST,
+            'MTSN': MTSN
             #'TransformerMOE': TransformerMOE,
         }
         model = model_dict[self.args.model].Model(self.args).float()

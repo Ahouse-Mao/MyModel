@@ -8,62 +8,42 @@ from layers.MTSN_layers2 import Stage
 from layers.MTSN_layers2 import Flatten_Head
 from layers.RevIN import RevIN
 
-# TODO：MTSNMoeSparseExpertsLayer的forward部分有待修改内容
+
 
 class MTSNMoeSparseExpertsLayer(nn.Module):
-    'top_k, num_experts, hidden_size'
-    def __init__(self, configs, block_name,
-                 context_window, patch_len, stride, padding_patch, # patch参数
-                 seq_R, freq, c_in, c_out, period, # short的参数
-                 target_window, # flatten层参数
-                 max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                 norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
-                 padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
-                 pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
-                 pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                 revin=True, affine=True, subtract_last=False, **kwargs):
+    """这里暂时只考虑Long的MOE"""
+    def __init__(self, patch_num, 
+                 patch_len,
+                 c_in,
+                 top_k, num_experts, hidden_size,
+                 n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                 attn_dropout=0., dropout= 0, act='gelu',
+                 res_attention=True, pre_norm=False, store_attn=False,
+                ):
         super(MTSNMoeSparseExpertsLayer, self).__init__()
-        self.comfigs = configs
-        self.top_k = configs.top_k
-        self.moe_num_experts = configs.num_experts
-        self.hidden_size = configs.hidden_size
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.hidden_size = hidden_size
         self.norm_topk_prob = False # 是否对topk权重进行归一化
+        
 
         self.gates = nn.Linear(self.hidden_size, self.num_experts)
-        if block_name == "MTSN_long":
-            self.experts = nn.ModuleList(
-                [MTSN_long(
-                    context_window, patch_len, stride, padding_patch, # patch参数
-                    c_in,
-                    target_window, # flatten层参数
-                    max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                    norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
-                    padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
-                    pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
-                    pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                    revin=True, affine=True, subtract_last=False, **kwargs # Revin归一化参数
-                ) for _ in range(self.num_experts)]
-            )
-            self.shared_expert = MTSN_long(
-                    context_window, patch_len, stride, padding_patch, # patch参数
-                    c_in,
-                    target_window, # flatten层参数
-                    max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                    norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
-                    padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
-                    pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
-                    pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                    revin=True, affine=True, subtract_last=False, **kwargs # Revin归一化参数
-                )
-        elif block_name == "MTSN_short":
-            self.experts = nn.ModuleList(
-                [MTSN_short(
-                    seq_R, freq, c_in, c_out, period
-                )for _ in range(self.num_experts)]
-            )
-            self.shared_expert = MTSN_short(seq_R, freq, c_in, c_out, period)
-
-        self.shared_expert_gate = nn.Linear(self.hidden_size, 1, bias=False)
+        self.experts = nn.ModuleList(
+            [MTSN_long(
+                patch_len, patch_num, # patch参数
+                c_in,  
+                n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                attn_dropout=0., dropout= 0, act='gelu',
+                res_attention=True, pre_norm=False, store_attn=False,
+            ) for _ in range(self.num_experts)]
+        )
+        self.shared_expert = MTSN_long(
+                patch_len, patch_num, # patch参数
+                c_in,  
+                n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                attn_dropout=0., dropout= 0, act='gelu',
+                res_attention=True, pre_norm=False, store_attn=False,
+        )
 
     def forward(self, hidden_states):
         batch_size, sequence_length, hidden_dim = hidden_states.shape # hidden_states: [batch_size, sequence_length, hidden_dim]
@@ -134,15 +114,17 @@ class MTSN(nn.Module):
     5.对变量间相关性进行建模
 
     新加入了参数num_downsample
+
     """
     
     def __init__(self,
+                top_k, num_experts, # moe参数
                 dims, patch_size, patch_stride,  downsample_ratio, # stem和downsample参数
                 num_blocks, ffn_ratio, large_size, small_size, dw_dims, nvars, # block参数
-                seq_len=512, individual=False, target_window=96, head_dropout=0.1, # head参数
+                seq_len, individual=False, target_window=96, head_dropout=0.1, # head参数
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
-                c_in=7, revin=True, affine=True, subtract_last=False): # RevIN参数
+                revin=True, affine=True, subtract_last=False): # RevIN参数
         self.nvars = nvars # 变量个数
         self.patch_size = patch_size
         self.target_window = target_window
@@ -154,7 +136,7 @@ class MTSN(nn.Module):
         # RevIN
         self.revin = revin
         if self.revin:
-            self.revin_layer = RevIN(c_in, affine=affine, subtract_last=subtract_last)
+            self.revin_layer = RevIN(nvars, affine=affine, subtract_last=subtract_last)
 
         # 定义stem and downsample layers
         self.downsample_layers = nn.ModuleList()
@@ -179,15 +161,15 @@ class MTSN(nn.Module):
         for stage_idx in range(self.num_stage):
             layer = Stage(ffn_ratio, num_blocks, large_size, small_size, dmodel=dims,
                           dw_model=dw_dims, nvars=nvars, small_kernel_merged=small_kernel_merged, drop=backbone_dropout)
-            self.stages.append(layer)
+            self.stages.append(layer)  
 
-
-        
+        # 定义MTSN_LongMOE
+        self.patch_num = (seq_len + patch_size - patch_stride - patch_size) // patch_stride + 1 # 修改了一下patch_num的计算方式
+        self.LongMOE = MTSNMoeSparseExpertsLayer( patch_num=self.patch_num, patch_len=patch_size, c_in=nvars,
+                                                 top_k=top_k, num_experts=num_experts, hidden_size=dims*nvars) # 修改hidden_size的计算方式，从dims变为dims*nvars
 
         # 定义flattenhead
-        self.patch_num = (seq_len + patch_size - patch_stride - patch_size)/patch_stride + 1 # 修改了一下patch_num的计算方式
-
-        self.n_vars = c_in
+        self.n_vars = nvars
         self.individual = individual
         d_model = dims
         if self.patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
@@ -207,14 +189,15 @@ class MTSN(nn.Module):
         # 2.准备进入embedding层及多尺度卷积层
         B,M,L = x.shape # B是batch size，M是变量个数，L是序列长度
 
-        x.unsqueeze(-2)
+        x = x.unsqueeze(-2)
+        x_trans = torch.empty(0)
         for i in range(self.num_stage):
             B, M, D, N = x.shape # D是每个变量的通道个数，N是分patch后的patch个数
             x = x.reshape(B * M, D, N)
             if i==0:
                 if self.patch_size != self.patch_stride:
                     # stem layer padding
-                    pad_len = self.patch_size - self.patch_stride # pad_len的确定只是为了保证切分patch到最后时，万一剩余的序列长度<patch_stidee,则会损失数据，而pad后则不会损失
+                    pad_len = self.patch_size - self.patch_stride # pad_len的确定只是为了保证切分patch到最后时，万一剩余的序列长度<patch_stride,则会损失数据，而pad后则不会损失
                     pad = x[:,:,-1:].repeat(1,1,pad_len)
                     x = torch.cat([x,pad],dim=-1)
             else:
@@ -229,17 +212,9 @@ class MTSN(nn.Module):
             x = self.stages[i](x)
             
             if i ==0:
-                x_trans = MTSN_long(
-                    patch_len = self.patch_size, patch_num = self.patch_num,# patch参数
-                    c_in=self.nvars,
-                    target_window =self.target_window, # flatten层参数
-                    max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                    norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
-                    padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
-                    pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
-                    pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                    revin=True, affine=True, subtract_last=False # Revin归一化参数
-                )
+                x_trans = x
+        
+        x_long = self.LongMOE(x_trans)
         
         # 3.进入FlattenHead层
         x = self.head(x)
@@ -259,6 +234,8 @@ class Model(nn.Module):
         super(Model, self).__init__()
 
         # 这下面是ModernTCN的参数
+        self.dims = configs.enc_in
+
         # 下采样相关
         self.stem_ratio = configs.stem_ratio
         self.downsample_ratio = configs.downsample_ratio
@@ -291,18 +268,27 @@ class Model(nn.Module):
         # patch参数
         self.kernel_size = configs.kernel_size
         self.patch_size = configs.patch_size
-        self.patch_stide = configs.patch_stide
+        self.patch_stride = configs.patch_stride
 
-        # TODO：MOE专家模型参数
+        # MOE专家模型参数
+        self.top_k = configs.top_k
+        self.num_experts = configs.num_experts
+        self.ffn_ratio = configs.ffn_ratio
 
+        # head参数
+        self.head_dropout = configs.head_dropout
 
-        self.model = MTSN()
+        self.model = MTSN(top_k=self.top_k, num_experts=self.num_experts, ffn_ratio=self.ffn_ratio,
+                          dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
+                          num_blocks=self.num_blocks, large_size=self.large_size, small_size=self.small_size, dw_dims=self.dw_dims, nvars=self.c_in,
+                          seq_len=self.seq_len, individual=self.individual, target_window=self.target_window
+        )
     
-    def forward(self, x):
+    def forward(self, x , x_mark, dec_inp, batch_y_mark):
 
-        x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
         x = self.model(x)
-        x.permute(0, 2, 1)
+        x = x.permute(0, 2, 1)
 
         return x
 

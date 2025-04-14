@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from layers.RevIN import RevIN
 from typing import Optional
 from layers.MTSN_layers import *
 import numpy as np
@@ -13,79 +12,23 @@ class MTSN_long(nn.Module):
     """
     def __init__(self, patch_len, patch_num,# patch参数
                  c_in,
-                 target_window, # flatten层参数
-                 max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                 norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
-                 padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
-                 pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
-                 pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                 revin=True, affine=True, subtract_last=False): # Revin归一化参数
+                 n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                 attn_dropout=0., dropout= 0, act='gelu',
+                 res_attention=True, pre_norm=False, store_attn=False,
+                 ): # TSTiEncoder参数
         super(MTSN_long, self).__init__()
-        """
-        TODO:因为patch部分已经在MTSN中实现, 所以这部分patch的内容去掉
-        # revin
-        self.revin = revin
-        if self.revin: self.revin_layer = RevIN(c_in, affine=affine, subtract_last=subtract_last) # Revin可逆归一化
-
-        # patch
-        self.patch_len = patch_len # 每个patch的长度
-        self.stride = stride # 切分步长
-        self.padding_patch = padding_patch # 填充策略
-        patch_num = int((context_window - patch_len) / stride + 1) # patch数量, 上下文窗口长度为context_window
-        if self.padding_patch == 'end':
-            self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) # 通过复制数据的边缘值来填充，避免因为卷积核的滑动导致长度缩减
-            patch_num += 1    
-        """
         
-        self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
+        self.backbone = TSTiEncoder(patch_num=patch_num, patch_len=patch_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
-                                attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
-                                attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose)
-        """
-        head部分不在这里完成
-        # Head
-        self.head_nf = d_model * patch_num
-        self.n_vars = c_in
-        self.pretrain_head = pretrain_head
-        self.head_type = head_type
-        self.individual = individual
-
-        if self.pretrain_head: 
-            self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout) # custom head passed as a partial func with all its kwargs
-        elif head_type == 'flatten': 
-            self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
-        """
+                                attn_dropout=attn_dropout, dropout=dropout, act=act,
+                                res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
+                                )
 
     def forward(self, z):
-        """
-        norm和patching都不在这里完成
-        # norm
-        if self.revin:
-            z = z.permute(0,2,1) # 这里又给它转置回去
-            z = self.revin_layer(z, 'norm')
-            z = z.permute(0,2,1)
-
-        # do patching
-        if self.padding_patch == 'end':
-            z = self.padding_patch_layer(z) # 填充使得seq_len增加了stride
-        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride) # z: [bs , nvars , patch_num , patch_len] 把最后一个维度解包为patch_len*patch_num
-        z = z.permute(0,1,3,2)  # z: [batch_size , n_vars , patch_len , patch_num]
-        """
 
         # model
         z = self.backbone(z) # z: [bs x nvars x d_model x patch_num]
 
-        """
-        head和denorm也不在这里完成
-        z = self.head(z)
-
-        # denorm
-        if self.revin: 
-            z = z.permute(0,2,1)
-            z = self.revin_layer(z, 'denorm')
-            z = z.permute(0,2,1)
-        """
         return z
 
     def create_pretrain_head(self, head_nf, vars, dropout):
@@ -93,87 +36,35 @@ class MTSN_long(nn.Module):
                     nn.Conv1d(head_nf, vars, 1)
                     )
 
-"""
-class Flatten_Head(nn.Module):
-    def __init__(self, individual, n_vars, nf, target_window, head_dropout=0):
-        super().__init__()
-        
-        self.individual = individual
-        self.n_vars = n_vars
-        
-        if self.individual:
-            self.linears = nn.ModuleList()
-            self.dropouts = nn.ModuleList()
-            self.flattens = nn.ModuleList()
-            for i in range(self.n_vars):
-                self.flattens.append(nn.Flatten(start_dim=-2))
-                self.linears.append(nn.Linear(nf, target_window))
-                self.dropouts.append(nn.Dropout(head_dropout))
-        else:
-            self.flatten = nn.Flatten(start_dim=-2)
-            self.linear = nn.Linear(nf, target_window)
-            self.dropout = nn.Dropout(head_dropout)
-            
-    def forward(self, x):                                 # x: [bs x nvars x d_model x patch_num]
-        if self.individual:
-            x_out = []
-            for i in range(self.n_vars):
-                z = self.flattens[i](x[:,i,:,:])          # z: [bs x d_model * patch_num]
-                z = self.linears[i](z)                    # z: [bs x target_window]
-                z = self.dropouts[i](z)
-                x_out.append(z)
-            x = torch.stack(x_out, dim=1)                 # x: [bs x nvars x target_window]
-        else:
-            x = self.flatten(x)
-            x = self.linear(x)
-            x = self.dropout(x)
-        return x
-"""
-
 
 class TSTiEncoder(nn.Module):  #i means channel-independent
     
-    def __init__(self, c_in, patch_num, patch_len, max_seq_len=1024,
+    def __init__(self, patch_num, patch_len,
                  n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None,
                  d_ff=256, norm='BatchNorm', attn_dropout=0., dropout=0., act="gelu", store_attn=False,
-                 key_padding_mask='auto', padding_var=None, attn_mask=None, res_attention=True, pre_norm=False,
-                 pe='zeros', learn_pe=True, verbose=False, **kwargs):
+                 res_attention=True, pre_norm=False,):
         
         
         super().__init__()
         
         self.patch_num = patch_num
         self.patch_len = patch_len
-        
-        """
-        这里patch的
-        # Input encoding
-        q_len = patch_num
-        # TODO: embedding方式可以修改为conv1d试试
-        self.W_P = nn.Linear(patch_len, d_model)        # Eq 1: projection of feature vectors onto a d-dim vector space
-        self.seq_len = q_len
-
-        # Positional encoding
-        self.W_pos = positional_encoding(pe, learn_pe, q_len, d_model)
-        """
 
         # Residual dropout
         self.dropout = nn.Dropout(dropout)
 
         # Encoder
-        self.encoder = TSTEncoder(patch_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
-                                   pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
+        self.encoder = TSTEncoder(d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
+                                  norm=norm, attn_dropout=attn_dropout, dropout=dropout, activation=act,
+                                  pre_norm=pre_norm, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
 
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
         
         n_vars = x.shape[1]
-        # Input encoding
-        x = x.permute(0,1,3,2)                                                   # x: [bs x nvars x patch_num x patch_len]
-        x = self.W_P(x)                                                          # x: [bs x nvars x patch_num x d_model]
 
         u = torch.reshape(x, (x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))      # u: [bs * nvars x patch_num x d_model]
-        u = self.dropout(u + self.W_pos)                                         # u: [bs * nvars x patch_num x d_model]
+        u = self.dropout(u)                                         # u: [bs * nvars x patch_num x d_model]
 
         # Encoder
         z = self.encoder(u)                                                      # z: [bs * nvars x patch_num x d_model]
@@ -188,12 +79,12 @@ class TSTEncoder(nn.Module):
     """
     负责封装若干个TSTEncoderLayer
     """
-    def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=None, 
+    def __init__(self, d_model, n_heads, d_k=None, d_v=None, d_ff=None, 
                         norm='BatchNorm', attn_dropout=0., dropout=0., activation='gelu',
                         res_attention=False, n_layers=1, pre_norm=False, store_attn=False):
         super().__init__()
 
-        self.layers = nn.ModuleList([TSTEncoderLayer(q_len, d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm,
+        self.layers = nn.ModuleList([TSTEncoderLayer( d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm,
                                                       attn_dropout=attn_dropout, dropout=dropout,
                                                       activation=activation, res_attention=res_attention,
                                                       pre_norm=pre_norm, store_attn=store_attn) for i in range(n_layers)])
@@ -210,12 +101,11 @@ class TSTEncoder(nn.Module):
             return output
 
 
-
 class TSTEncoderLayer(nn.Module):
     """
     一个TSTEncoderLayer
     """
-    def __init__(self, q_len, d_model, n_heads, d_k=None, d_v=None, d_ff=256, store_attn=False,
+    def __init__(self, d_model, n_heads, d_k=None, d_v=None, d_ff=256, store_attn=False,
                  norm='BatchNorm', attn_dropout=0, dropout=0., bias=True, activation="gelu", res_attention=False, pre_norm=False):
         super().__init__()
         assert not d_model%n_heads, f"d_model ({d_model}) must be divisible by n_heads ({n_heads})"

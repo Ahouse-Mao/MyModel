@@ -28,16 +28,19 @@ parser = argparse.ArgumentParser(description=
 # basic config
 parser.add_argument('--is_training', type=int, default=1, help='status')
 parser.add_argument('--task_id', type=str, default='test', help='task id')
-parser.add_argument('--model', type=str, default='PatchTST',
+parser.add_argument('--model', type=str, default='MTSN',
     help='model name, options: [TPGN, iTransformer, TimeMixer, FITS, ModernTCN, PDF, \
     WITRAN, CrossGNN, FourierGNN, Basisformer, \
     MICN, TimesNet, PatchTST, DLinear, NLinear, Linear, \
-    FiLM, FEDformer, Pyraformer, Autoformer, Informer, Transformer]')
+    FiLM, FEDformer, Pyraformer, Autoformer, Informer, Transformer, MTSN]')
 
-# MOE config
-parser.add_argument('--use_moe', type=str, default='True', help='use moe or not') # 自己添加的是否使用MOE的参数
-parser.add_argument('--moe_num_experts', type=int, default=8, help='number of experts') # 自己添加的专家个数参数
-parser.add_argument('--k', type=int, default=8, help='top-k experts') # 使用top-k算法的参数
+# MTSN config
+parser.add_argument('--num_blocks', type=int, default=3, help='number of blocks')
+parser.add_argument('--top_k', type=int, default=2, help='top k')
+parser.add_argument('--num_experts', type=int, default=4, help='number of experts')
+
+
+# parser.add_argument('--patch_stride', type=int, default=4, help='patch stride')
 
 # data loader
 parser.add_argument('--data', type=str, default='electricity', help='dataset type')
@@ -84,7 +87,7 @@ parser.add_argument('--do_predict', action='store_true', help='whether to predic
 parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
 parser.add_argument('--itr', type=int, default=5, help='experiments times')
 parser.add_argument('--train_epochs', type=int, default=25, help='train epochs')
-parser.add_argument('--batch_size', type=int, default=256, help='batch size of train input data')
+parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
 parser.add_argument('--patience', type=int, default=5, help='early stopping patience')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='optimizer learning rate')
 parser.add_argument('--des', type=str, default='test', help='exp description')
