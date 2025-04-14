@@ -11,7 +11,7 @@ class MTSN_long(nn.Module):
     """
     基于patchTST修改的长时序预测
     """
-    def __init__(self, context_window, patch_len, stride, padding_patch, # patch参数
+    def __init__(self, patch_len, patch_num,# patch参数
                  c_in,
                  target_window, # flatten层参数
                  max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
@@ -19,9 +19,10 @@ class MTSN_long(nn.Module):
                  padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
                  pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
                  pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
-                 revin=True, affine=True, subtract_last=False, **kwargs): # Revin归一化参数
+                 revin=True, affine=True, subtract_last=False): # Revin归一化参数
         super(MTSN_long, self).__init__()
-
+        """
+        TODO:因为patch部分已经在MTSN中实现, 所以这部分patch的内容去掉
         # revin
         self.revin = revin
         if self.revin: self.revin_layer = RevIN(c_in, affine=affine, subtract_last=subtract_last) # Revin可逆归一化
@@ -33,14 +34,16 @@ class MTSN_long(nn.Module):
         patch_num = int((context_window - patch_len) / stride + 1) # patch数量, 上下文窗口长度为context_window
         if self.padding_patch == 'end':
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride)) # 通过复制数据的边缘值来填充，避免因为卷积核的滑动导致长度缩减
-            patch_num += 1
+            patch_num += 1    
+        """
         
         self.backbone = TSTiEncoder(c_in, patch_num=patch_num, patch_len=patch_len, max_seq_len=max_seq_len,
                                 n_layers=n_layers, d_model=d_model, n_heads=n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff,
                                 attn_dropout=attn_dropout, dropout=dropout, act=act, key_padding_mask=key_padding_mask, padding_var=padding_var,
                                 attn_mask=attn_mask, res_attention=res_attention, pre_norm=pre_norm, store_attn=store_attn,
-                                pe=pe, learn_pe=learn_pe, verbose=verbose, **kwargs)
-
+                                pe=pe, learn_pe=learn_pe, verbose=verbose)
+        """
+        head部分不在这里完成
         # Head
         self.head_nf = d_model * patch_num
         self.n_vars = c_in
@@ -52,8 +55,11 @@ class MTSN_long(nn.Module):
             self.head = self.create_pretrain_head(self.head_nf, c_in, fc_dropout) # custom head passed as a partial func with all its kwargs
         elif head_type == 'flatten': 
             self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window, head_dropout=head_dropout)
+        """
 
     def forward(self, z):
+        """
+        norm和patching都不在这里完成
         # norm
         if self.revin:
             z = z.permute(0,2,1) # 这里又给它转置回去
@@ -65,9 +71,13 @@ class MTSN_long(nn.Module):
             z = self.padding_patch_layer(z) # 填充使得seq_len增加了stride
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride) # z: [bs , nvars , patch_num , patch_len] 把最后一个维度解包为patch_len*patch_num
         z = z.permute(0,1,3,2)  # z: [batch_size , n_vars , patch_len , patch_num]
+        """
 
         # model
-        z = self.backbone(z)                                                                # z: [bs x nvars x d_model x patch_num]
+        z = self.backbone(z) # z: [bs x nvars x d_model x patch_num]
+
+        """
+        head和denorm也不在这里完成
         z = self.head(z)
 
         # denorm
@@ -75,6 +85,7 @@ class MTSN_long(nn.Module):
             z = z.permute(0,2,1)
             z = self.revin_layer(z, 'denorm')
             z = z.permute(0,2,1)
+        """
         return z
 
     def create_pretrain_head(self, head_nf, vars, dropout):
@@ -82,6 +93,7 @@ class MTSN_long(nn.Module):
                     nn.Conv1d(head_nf, vars, 1)
                     )
 
+"""
 class Flatten_Head(nn.Module):
     def __init__(self, individual, n_vars, nf, target_window, head_dropout=0):
         super().__init__()
@@ -116,7 +128,7 @@ class Flatten_Head(nn.Module):
             x = self.linear(x)
             x = self.dropout(x)
         return x
-
+"""
 
 
 class TSTiEncoder(nn.Module):  #i means channel-independent
@@ -133,6 +145,8 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         self.patch_num = patch_num
         self.patch_len = patch_len
         
+        """
+        这里patch的
         # Input encoding
         q_len = patch_num
         # TODO: embedding方式可以修改为conv1d试试
@@ -141,12 +155,13 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
 
         # Positional encoding
         self.W_pos = positional_encoding(pe, learn_pe, q_len, d_model)
+        """
 
         # Residual dropout
         self.dropout = nn.Dropout(dropout)
 
         # Encoder
-        self.encoder = TSTEncoder(q_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
+        self.encoder = TSTEncoder(patch_len, d_model, n_heads, d_k=d_k, d_v=d_v, d_ff=d_ff, norm=norm, attn_dropout=attn_dropout, dropout=dropout,
                                    pre_norm=pre_norm, activation=act, res_attention=res_attention, n_layers=n_layers, store_attn=store_attn)
 
         

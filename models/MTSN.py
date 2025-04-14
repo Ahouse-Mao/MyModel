@@ -3,6 +3,9 @@ from torch import nn
 from layers.MTSN_long import MTSN_long
 from layers.MTSN_short import MTSN_short
 import torch.nn.functional as F
+from layers.MTSN_layers2 import LayerNorm
+from layers.MTSN_layers2 import Stage
+from layers.MTSN_layers2 import Flatten_Head
 from layers.RevIN import RevIN
 
 # TODO：MTSNMoeSparseExpertsLayer的forward部分有待修改内容
@@ -117,200 +120,7 @@ class MTSNMoeSparseExpertsLayer(nn.Module):
 
 
 
-class Flatten_Head(nn.Module):
-    """
-    独立模式适用于变量差异大的情况(例如温度和压力传感器等),适用于多任务学习
-    共享模式适用于变量相关性高,适用于单任务多变量预测
-    变量数过多建议共享模式,变量数少可采用独立模式
-    """
-    # TODO：如果要独立处理，能否在这里进行并行化处理，提升处理速度？
-    def __init__(self, individual, n_vars, nf, target_window, head_dropout=0):
-        super(Flatten_Head, self).__init__()
 
-        self.individual = individual # 是否独立处理每个变量
-        self.n_vars = n_vars # 变量总数
-        if self.individual: # 独立处理模式
-            self.linears = nn.ModuleList()
-            self.dropouts = nn.ModuleList()
-            self.flattens = nn.ModuleList()
-            for i in range(self.n_vars): # 创建每个变量的处理链
-                self.flattens.append(nn.Flatten(start_dim=-2)) # 把通道数和patchnum两个维度进行合并
-                self.linears.append(nn.Linear(nf, target_window)) # 把特征维度映射到目标窗口大小
-                self.dropouts.append(nn.Dropout(head_dropout)) # dropout层
-        else: # 共享处理模式
-            self.flatten = nn.Flatten(start_dim=-2) # 把通道数和patchnum两个维度进行合并
-            self.linear = nn.Linear(nf, target_window) # 把特征维度映射到目标窗口大小
-            self.dropout = nn.Dropout(head_dropout) # dropout层
-
-    def forward(self, x):  # x: [bs x nvars x d_model x patch_num]
-        if self.individual: 
-            x_out = []
-            for i in range(self.n_vars):
-                z = self.flattens[i](x[:, i, :, :])  # z: [bs x d_model * patch_num]
-                z = self.linears[i](z)  # z: [bs x target_window]
-                z = self.dropouts[i](z)
-                x_out.append(z)
-            x = torch.stack(x_out, dim=1)  # x: [bs x nvars x target_window]
-        else:
-            x = self.flatten(x)
-            x = self.linear(x)
-            x = self.dropout(x)
-        return x
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, channels, eps=1e-6, data_format="channels_last"):
-        super(LayerNorm, self).__init__()
-        self.norm = nn.Layernorm(channels)
-
-    def forward(self, x):
-        B, M, D, N = x.shape
-        x = x.permute(0, 1, 3, 2)
-        x = x.reshape(B * M, N, D)
-        x = self.norm(x)
-        x = x.reshape(B, M, N, D)
-        x = x.permute(0, 1, 3, 2)
-        return x
-
-
-def get_conv1d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias):
-    # 封装一个conv1d函数
-    return nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride,
-                     padding=padding, dilation=dilation, groups=groups, bias=bias)
-
-
-def get_bn(channels):
-    # 返回一个BatchNorm1d的函数
-    return nn.BatchNorm1d(channels)
-
-def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups, dilation=1,bias=False):
-    if padding is None:
-        padding = kernel_size // 2
-        # 类似的保持特征图不变的padding
-    result = nn.Sequential()
-    result.add_module('conv', get_conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                         stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias))
-    result.add_module('bn', get_bn(out_channels)) # name表示能让子模块以result.bn的形式被调用
-    return result
-
-class ReparamLargeKernelConv(nn.Module):
-
-    def __init__(self, in_channels, out_channels, kernel_size,
-                 stride, groups,
-                 small_kernel,
-                 small_kernel_merged=False, nvars=7): # small_kernel_merged小核是否合并参数，训练/推理模式
-        super(ReparamLargeKernelConv, self).__init__()
-        self.kernel_size = kernel_size 
-        self.small_kernel = small_kernel
-
-        padding = kernel_size // 2 # 保持特征图尺寸不变的对称填充，可以修改
-        if small_kernel_merged: # 推理模式，使用等效卷积
-            self.lkb_reparam = nn.Conv1d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                         stride=stride, padding=padding, dilation=1, groups=groups, bias=True)
-        else: # 训练模式，构建多分支结构, bn函数只是为了构建2个分支更加便捷
-            self.lkb_origin = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                        stride=stride, padding=padding, dilation=1, groups=groups,bias=False) # 主分支，大核卷积+BN
-            if small_kernel is not None: # 辅助分支，小核卷积+BN
-                assert small_kernel <= kernel_size, 'The kernel size for re-param cannot be larger than the large kernel!'
-                self.small_conv = conv_bn(in_channels=in_channels, out_channels=out_channels,
-                                            kernel_size=small_kernel,
-                                            stride=stride, padding=small_kernel // 2, groups=groups, dilation=1,bias=False)
-
-
-    def forward(self, inputs):
-
-        if hasattr(self, 'lkb_reparam'): # hasattr()函数用于判断对象是否包含对应的属性
-            out = self.lkb_reparam(inputs)
-        else:
-            out = self.lkb_origin(inputs)
-            if hasattr(self, 'small_conv'):
-                out += self.small_conv(inputs) # 并行结构的特征融合
-
-        return out
-
-
-class Block(nn.Module):
-    """
-    借鉴自ModernTCN核心部分
-    """
-    def __init__(self, large_size, small_size, dmodel, dff, nvars, small_kernel_merged=False, drop=0.1):
-
-        super(Block, self).__init__()
-        self.dw = ReparamLargeKernelConv(in_channels=nvars * dmodel, out_channels=nvars * dmodel,
-                                         kernel_size=large_size, stride=1, groups=nvars * dmodel,
-                                         small_kernel=small_size, small_kernel_merged=small_kernel_merged, nvars=nvars)
-        self.norm = nn.BatchNorm1d(dmodel)
-
-        #convffn1
-        self.ffn1pw1 = nn.Conv1d(in_channels=nvars * dmodel, out_channels=nvars * dff, kernel_size=1, stride=1,
-                                 padding=0, dilation=1, groups=nvars)
-        self.ffn1act = nn.GELU()
-        self.ffn1pw2 = nn.Conv1d(in_channels=nvars * dff, out_channels=nvars * dmodel, kernel_size=1, stride=1,
-                                 padding=0, dilation=1, groups=nvars)
-        self.ffn1drop1 = nn.Dropout(drop)
-        self.ffn1drop2 = nn.Dropout(drop)
-
-        #convffn2
-        self.ffn2pw1 = nn.Conv1d(in_channels=nvars * dmodel, out_channels=nvars * dff, kernel_size=1, stride=1,
-                                 padding=0, dilation=1, groups=dmodel)
-        self.ffn2act = nn.GELU()
-        self.ffn2pw2 = nn.Conv1d(in_channels=nvars * dff, out_channels=nvars * dmodel, kernel_size=1, stride=1,
-                                 padding=0, dilation=1, groups=dmodel)
-        self.ffn2drop1 = nn.Dropout(drop)
-        self.ffn2drop2 = nn.Dropout(drop)
-
-        self.ffn_ratio = dff//dmodel
-    def forward(self,x):
-
-        input = x
-        B, M, D, N = x.shape
-        x = x.reshape(B,M*D,N)
-        x = self.dw(x) # depth wise卷积，各变量各通道间独立建模
-        x = x.reshape(B,M,D,N)
-        x = x.reshape(B*M,D,N)
-        x = self.norm(x)
-        x = x.reshape(B, M, D, N)
-        x = x.reshape(B, M * D, N)
-
-        x = self.ffn1drop1(self.ffn1pw1(x)) # convffn1对通道间关系进行建模
-        x = self.ffn1act(x)
-        x = self.ffn1drop2(self.ffn1pw2(x))
-        x = x.reshape(B, M, D, N)
-
-        x = x.permute(0, 2, 1, 3)
-        x = x.reshape(B, D * M, N)
-        x = self.ffn2drop1(self.ffn2pw1(x)) # convffn2对变量间关系进行建模
-        x = self.ffn2act(x)
-        x = self.ffn2drop2(self.ffn2pw2(x))
-        x = x.reshape(B, D, M, N)
-        x = x.permute(0, 2, 1, 3)
-
-        x = input + x
-        return x
-
-
-class Stage(nn.Module):
-    """
-    Stage类主要是对Block块进行封装, 每个Stage包含多个Block块, 每个Stage对应不同尺度的卷积
-    """
-    def __init__(self, ffn_ratio, num_blocks, large_size, small_size, dmodel, dw_model, nvars,
-                 small_kernel_merged=False, drop=0.1):
-
-        super(Stage, self).__init__()
-        d_ffn = dmodel * ffn_ratio
-        blks = []
-        for i in range(num_blocks):
-            blk = Block(large_size=large_size, small_size=small_size, dmodel=dmodel, dff=d_ffn, nvars=nvars, small_kernel_merged=small_kernel_merged, drop=drop)
-            blks.append(blk)
-
-        self.blocks = nn.ModuleList(blks)
-
-    def forward(self, x):
-
-        for blk in self.blocks:
-            x = blk(x)
-
-        return x
 
 
 class MTSN(nn.Module):
@@ -333,6 +143,11 @@ class MTSN(nn.Module):
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
                 c_in=7, revin=True, affine=True, subtract_last=False): # RevIN参数
+        self.nvars = nvars # 变量个数
+        self.patch_size = patch_size
+        self.target_window = target_window
+
+
         
         super(MTSN, self).__init__()
 
@@ -358,7 +173,7 @@ class MTSN(nn.Module):
         self.patch_stride = patch_stride
         self.downsample_ratio = downsample_ratio
 
-        # 定义backbone
+        # 定义backbone_conv
         self.num_stage = num_blocks
         self.stages = nn.ModuleList()
         for stage_idx in range(self.num_stage):
@@ -366,16 +181,19 @@ class MTSN(nn.Module):
                           dw_model=dw_dims, nvars=nvars, small_kernel_merged=small_kernel_merged, drop=backbone_dropout)
             self.stages.append(layer)
 
+
+        
+
         # 定义flattenhead
-        patch_num = seq_len // patch_stride
+        self.patch_num = (seq_len + patch_size - patch_stride - patch_size)/patch_stride + 1 # 修改了一下patch_num的计算方式
 
         self.n_vars = c_in
         self.individual = individual
         d_model = dims
-        if patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
-            self.head_nf = d_model * patch_num // pow(downsample_ratio,(self.num_stage - 1))
+        if self.patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
+            self.head_nf = d_model * self.patch_num // pow(downsample_ratio,(self.num_stage - 1))
         else:
-            self.head_nf = d_model * (patch_num // pow(downsample_ratio, (self.num_stage - 1))+1)    
+            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio, (self.num_stage - 1))+1)    
         self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
                                      head_dropout=head_dropout)
     
@@ -409,6 +227,19 @@ class MTSN(nn.Module):
             _, D_, N_ = x.shape
             x = x.reshape(B, M, D_, N_)
             x = self.stages[i](x)
+            
+            if i ==0:
+                x_trans = MTSN_long(
+                    patch_len = self.patch_size, patch_num = self.patch_num,# patch参数
+                    c_in=self.nvars,
+                    target_window =self.target_window, # flatten层参数
+                    max_seq_len=1024, n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                    norm='BatchNorm', attn_dropout=0., dropout= 0, act='gelu', key_padding_mask='auto',
+                    padding_var=None, attn_mask=None, res_attention=True, pre_norm=False, store_attn=False,
+                    pe='zeros', learn_pe=True, verbose=False, fc_dropout=0., # TSTiEncoder参数
+                    pretrain_head=False, head_type='flatten', individual=False, head_dropout=0, # flatten层的参数
+                    revin=True, affine=True, subtract_last=False # Revin归一化参数
+                )
         
         # 3.进入FlattenHead层
         x = self.head(x)
@@ -427,9 +258,53 @@ class Model(nn.Module):
     def __init__(self, configs):
         super(Model, self).__init__()
 
-        self.configs = configs
+        # 这下面是ModernTCN的参数
+        # 下采样相关
+        self.stem_ratio = configs.stem_ratio
+        self.downsample_ratio = configs.downsample_ratio
+        self.ffn_ratio = configs.ffn_ratio
 
-        self.MTSN = MTSN()
+        # RevIN归一化相关
+        self.revin = configs.revin
+        self.affine = configs.affine
+        self.subtract_last = configs.subtract_last
+
+        # 模型输入输出相关
+        self.c_in = configs.enc_in
+        self.seq_len = configs.seq_len
+        self.target_window = configs.pred_len
+
+        # 模型内部维度转换参数
+        self.dims = configs.d_model
+        self.dw_dims = configs.d_model
+        self.num_blocks = configs.num_blocks
+
+        # 卷积相关参数设置
+        self.large_size = configs.large_size
+        self.small_size = configs.small_size
+
+        self.individual = configs.individual
+
+        self.small_kernel_merged = configs.small_kernel_merged
+        self.dropout = configs.dropout
+
+        # patch参数
+        self.kernel_size = configs.kernel_size
+        self.patch_size = configs.patch_size
+        self.patch_stide = configs.patch_stide
+
+        # TODO：MOE专家模型参数
+
+
+        self.model = MTSN()
+    
+    def forward(self, x):
+
+        x.permute(0, 2, 1)
+        x = self.model(x)
+        x.permute(0, 2, 1)
+
+        return x
 
 
 
