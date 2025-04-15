@@ -12,53 +12,65 @@ from layers.RevIN import RevIN
 
 class MTSNMoeSparseExpertsLayer(nn.Module):
     """这里暂时只考虑Long的MOE"""
+    """
+    因为MOE接受的输入是(batch_size, seq_len, hidden_dim)
+    然而传入的输入是(batch_size, nvars, patch_dim, patch_num)
+    方案一是调整输入的形状, 将batch_size和nvars合并, 这样相当于将每个变量的patch序列视为独立的样本
+
+    方案二是将n_vars并入patch_dim, 形成一个更大的特征维度, 保持patch_num作为序列长度
+    下面先采用方案一
+    """
     def __init__(self, patch_num, 
                  patch_len,
                  c_in,
                  top_k, num_experts, hidden_size,
-                 n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                 n_layers, d_model, n_heads, d_ff, d_k=None, d_v=None,
                  attn_dropout=0., dropout= 0, act='gelu',
                  res_attention=True, pre_norm=False, store_attn=False,
                 ):
         super(MTSNMoeSparseExpertsLayer, self).__init__()
         self.top_k = top_k
         self.num_experts = num_experts
-        self.hidden_size = hidden_size
+        self.hidden_size = hidden_size # hidden_size变成了
         self.norm_topk_prob = False # 是否对topk权重进行归一化
         
 
-        self.gates = nn.Linear(self.hidden_size, self.num_experts)
+        self.gates = nn.Linear(self.hidden_size, self.num_experts, bias=False)
         self.experts = nn.ModuleList(
             [MTSN_long(
                 patch_len, patch_num, # patch参数
                 c_in,  
-                n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                attn_dropout=0., dropout= 0, act='gelu',
-                res_attention=True, pre_norm=False, store_attn=False,
+                n_layers, d_model, n_heads, d_k, d_v, d_ff,
+                attn_dropout, dropout, act,
+                res_attention, pre_norm, store_attn,
             ) for _ in range(self.num_experts)]
         )
+        self.shared_gate = nn.Linear(self.hidden_size, 1, bias=False)
         self.shared_expert = MTSN_long(
                 patch_len, patch_num, # patch参数
                 c_in,  
-                n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
-                attn_dropout=0., dropout= 0, act='gelu',
-                res_attention=True, pre_norm=False, store_attn=False,
+                n_layers, d_model, n_heads, d_k, d_v, d_ff,
+                attn_dropout, dropout, act,
+                res_attention, pre_norm, store_attn
         )
 
     def forward(self, hidden_states):
-        batch_size, sequence_length, hidden_dim = hidden_states.shape # hidden_states: [batch_size, sequence_length, hidden_dim]
-        hidden_states = hidden_states.view(-1, hidden_dim) # [batch_size*sequence_length, hidden_dim]
+        # 实际上是batch_size, nvars, patch_dims, patch_num
+        B, M, D, N = hidden_states.shape
+        hidden_states = hidden_states.permute(0, 1, 3, 2) # [batch_size, nvars, patch_num, patch_dims]
+        hidden_states = hidden_states.reshape(B*M, N*D) # [batch_size*nvars, patch_num*patch_dims] #保证变量独立，但是每个变量只能选择一个专家
+
         router_logits = self.gates(hidden_states)
 
-        routing_weights = F.softmax(router_logits, dim=1, detype=torch.float) # [batch_size*sequence_length, num_experts]
-        routing_weights, selected_experts = torch.topk(routing_weights, self.num_experts, dim=-1) # [batch_size*sequence_length, top_k]
+        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float) # [batch_size*sequence_length, num_experts]
+        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1) # [batch_size*sequence_length, top_k]
         if self.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
         # 转回输入时的数据类型
         routing_weights = routing_weights.to(hidden_states.dtype)
 
         final_hidden_states = torch.zeros(
-            (batch_size*sequence_length, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
+            (B*M, N*D), dtype=hidden_states.dtype, device=hidden_states.device
         )
 
         # 使用one-hot来编码被选择的专家
@@ -76,24 +88,36 @@ class MTSNMoeSparseExpertsLayer(nn.Module):
             # idx(num_selected,), 表示该专家在top_k中的位置，范围[0, top_k-1];
             # top_x(num_selected,)表示该专家的输入索引，范围[0, batch_size*sequence_length-1]
             
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
+            current_state = hidden_states[None, top_x].reshape(-1, N*D)
             # hidden_states[top_x]把hidden_states中对应top_x索引的元素取出来，得到一个(num_selected, hidden_dim)的向量
             # hidden_states[None, top_x]加入了None后，相当于在第0维增加了一个维度，变成(1, num_selected, hidden_dim), None等价于unsqueeze(0)
             # reshape(-1, hidden_dim)重新展平为二维向量，形状是(num_selected, hidden_dim)
 
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None] # 对选中的专家进行前向传播计算, 并乘以routing_weights
+            current_state= current_state.reshape(current_state.shape[0], N, D)
+
+            current_hidden_states = expert_layer(current_state)
+
+            current_hidden_states = current_hidden_states.reshape(current_hidden_states.shape[0], N*D)
+            
+            current_hidden_states = current_hidden_states * routing_weights[top_x, idx, None] 
+            # 对选中的专家进行前向传播计算, 并乘以routing_weights, *是逐元素乘法, torch.mul()一样，并且从-1维度开始，进行广播
             # top_x对应输入位置索引，idx对应在top_k中的位置索引, routing_weights[top_x, idx, None]返回的是(num_selected, 1)的向量，None增加了一个维度，便于广播
 
-            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.detype)) # 将计算结果加到final_hidden_states中，top_x对应输入位置索引，current_hidden_states对应计算结果
+            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype)) # 将计算结果加到final_hidden_states中，top_x对应输入位置索引，current_hidden_states对应计算结果
             # 0指定了进行加法操作的维度，top_x指定了加法操作的位置索引，current_hidden_states指定了加法操作的值
-            # TODO：这里要注意在进行加法操作时注意专家计算回来的结果的形状，patchTST有可能会改变形状
         
+        hidden_states = hidden_states.reshape(hidden_states.shape[0], N, D)
         shared_expert_output = self.shared_expert(hidden_states)
-        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+        shared_expert_output = shared_expert_output.reshape(hidden_states.shape[0], N*D)
+
+        shared_gate_output = self.shared_gate(shared_expert_output)
+        shared_gate_output = F.sigmoid(shared_gate_output)
+
+        shared_expert_output = shared_gate_output * shared_expert_output
 
         final_hidden_states = final_hidden_states + shared_expert_output
 
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
+        final_hidden_states = final_hidden_states.reshape(B*M, N, D)
         # TODO：这里的展平操作可能有待修改
         return final_hidden_states, router_logits
 
@@ -119,12 +143,15 @@ class MTSN(nn.Module):
     
     def __init__(self,
                 top_k, num_experts, # moe参数
+                n_layers, n_heads, d_ff, # transformer参数
                 dims, patch_size, patch_stride,  downsample_ratio, # stem和downsample参数
                 num_blocks, ffn_ratio, large_size, small_size, dw_dims, nvars, # block参数
                 seq_len, individual=False, target_window=96, head_dropout=0.1, # head参数
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
-                revin=True, affine=True, subtract_last=False): # RevIN参数
+                revin=True, affine=True, subtract_last=False # RevIN参数
+                
+                ): 
         self.nvars = nvars # 变量个数
         self.patch_size = patch_size
         self.target_window = target_window
@@ -166,7 +193,9 @@ class MTSN(nn.Module):
         # 定义MTSN_LongMOE
         self.patch_num = (seq_len + patch_size - patch_stride - patch_size) // patch_stride + 1 # 修改了一下patch_num的计算方式
         self.LongMOE = MTSNMoeSparseExpertsLayer( patch_num=self.patch_num, patch_len=patch_size, c_in=nvars,
-                                                 top_k=top_k, num_experts=num_experts, hidden_size=dims*nvars) # 修改hidden_size的计算方式，从dims变为dims*nvars
+                                                  top_k=top_k, num_experts=num_experts, hidden_size=dims*self.patch_num, # 修改hidden_size的计算方式，从dims变为dims*nvars
+                                                  n_layers=n_layers, d_model=dims, n_heads=n_heads, d_ff=d_ff
+                                                ) 
 
         # 定义flattenhead
         self.n_vars = nvars
@@ -278,10 +307,16 @@ class Model(nn.Module):
         # head参数
         self.head_dropout = configs.head_dropout
 
+        # Transformer参数
+        self.n_layers = 3
+        self.n_heads = 4
+        self.d_ff = 256
+
         self.model = MTSN(top_k=self.top_k, num_experts=self.num_experts, ffn_ratio=self.ffn_ratio,
                           dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
                           num_blocks=self.num_blocks, large_size=self.large_size, small_size=self.small_size, dw_dims=self.dw_dims, nvars=self.c_in,
-                          seq_len=self.seq_len, individual=self.individual, target_window=self.target_window
+                          seq_len=self.seq_len, individual=self.individual, target_window=self.target_window,
+                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff
         )
     
     def forward(self, x , x_mark, dec_inp, batch_y_mark):

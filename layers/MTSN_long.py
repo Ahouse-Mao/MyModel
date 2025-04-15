@@ -12,7 +12,7 @@ class MTSN_long(nn.Module):
     """
     def __init__(self, patch_len, patch_num,# patch参数
                  c_in,
-                 n_layers=3, d_model=128, n_heads=16, d_k=None, d_v=None, d_ff=256,
+                 n_layers, d_model, n_heads, d_k, d_v, d_ff,
                  attn_dropout=0., dropout= 0, act='gelu',
                  res_attention=True, pre_norm=False, store_attn=False,
                  ): # TSTiEncoder参数
@@ -61,16 +61,22 @@ class TSTiEncoder(nn.Module):  #i means channel-independent
         
     def forward(self, x) -> Tensor:                                              # x: [bs x nvars x patch_len x patch_num]
         
+        """
+        这里
         n_vars = x.shape[1]
 
         u = torch.reshape(x, (x.shape[0]*x.shape[1],x.shape[2],x.shape[3]))      # u: [bs * nvars x patch_num x d_model]
-        u = self.dropout(u)                                         # u: [bs * nvars x patch_num x d_model]
+        """
+        u = self.dropout(x)                                         # u: [bs * nvars x patch_num x d_model]
 
         # Encoder
         z = self.encoder(u)                                                      # z: [bs * nvars x patch_num x d_model]
-        z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]
-        z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
+        """
+        这里不再进行转置
+        z = torch.reshape(z, (-1,n_vars,z.shape[-2],z.shape[-1]))                # z: [bs x nvars x patch_num x d_model]       
         
+        # z = z.permute(0,1,3,2)                                                   # z: [bs x nvars x d_model x patch_num]
+        """
         return z
 
 
