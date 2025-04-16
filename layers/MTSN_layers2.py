@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from typing import Optional, Tuple, List, Union
 
 
 class Flatten_Head(nn.Module):
@@ -27,7 +28,8 @@ class Flatten_Head(nn.Module):
             self.linear = nn.Linear(nf, target_window) # 把特征维度映射到目标窗口大小
             self.dropout = nn.Dropout(head_dropout) # dropout层
 
-    def forward(self, x):  # x: [bs x nvars x d_model x patch_num]
+    def forward(self, x, x_long):  # x: [bs x nvars x d_model x patch_num]
+        x = torch.concat((x, x_long), dim=-1) # 把长序列和短序列拼接在一起
         if self.individual: 
             x_out = []
             for i in range(self.n_vars):
@@ -196,3 +198,35 @@ class Stage(nn.Module):
             x = blk(x)
 
         return x
+    
+
+def load_balancing_loss_func(
+        gate_logits: torch.Tensor, # 传入的gate_logits可以是一个tensor，也可以是一个tuple或者list
+        # 如果是tensor则要求形状为(batch_size*seq_len, num_experts)
+        top_k: int,
+        num_experts: int = None,
+) -> torch.Tensor:
+
+    if gate_logits is None: # 检查gate_logits是否有效，无效则返回0.0
+        return 0.0
+
+    # Concat the logits from all layers
+    # compute_device = gate_logits[0].device
+
+    # concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
+
+    routing_weights = torch.nn.functional.softmax(gate_logits, dim=-1) # 最后一维应用softmax
+
+    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1) # 选取top_k个专家
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts) # 将top_k个专家的索引转换为one-hot编码
+
+    # 计算tok_k每次选择中选择每个专家的路由概率
+    tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
+
+    # 综合top_k次选择中每个专家的路由概率，由routing_weights的均值得到，给出了门控单元给予每个专家的概率
+    router_prob_per_expert = torch.mean(routing_weights, dim=0) 
+
+    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(dim=0)) # 最终损失的计算通过广播机制实现
+
+    return overall_loss * num_experts

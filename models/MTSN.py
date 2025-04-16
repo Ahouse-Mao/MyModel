@@ -7,6 +7,7 @@ from layers.MTSN_layers2 import LayerNorm
 from layers.MTSN_layers2 import Stage
 from layers.MTSN_layers2 import Flatten_Head
 from layers.RevIN import RevIN
+from layers.MTSN_layers2 import load_balancing_loss_func
 
 
 
@@ -122,11 +123,6 @@ class MTSNMoeSparseExpertsLayer(nn.Module):
         return final_hidden_states, router_logits
 
 
-
-
-
-
-
 class MTSN(nn.Module):
     """
     MTSN主结构
@@ -155,6 +151,8 @@ class MTSN(nn.Module):
         self.nvars = nvars # 变量个数
         self.patch_size = patch_size
         self.target_window = target_window
+        self.top_k = top_k
+        self.num_experts = num_experts
 
 
         
@@ -201,10 +199,12 @@ class MTSN(nn.Module):
         self.n_vars = nvars
         self.individual = individual
         d_model = dims
+        # flattenhead层为了适应Transformer层的concat，需要修改下面的head_nf计算方式
         if self.patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
-            self.head_nf = d_model * self.patch_num // pow(downsample_ratio,(self.num_stage - 1))
+            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio,(self.num_stage - 1)) + self.patch_num)
         else:
-            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio, (self.num_stage - 1))+1)    
+            # 不能被整除的时候, 在MTSN的forward部分已经改变了patch方式，所以只需要向下整除然后+1即可。
+            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio, (self.num_stage - 1))+1 + self.patch_num)    
         self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
                                      head_dropout=head_dropout)
     
@@ -243,17 +243,24 @@ class MTSN(nn.Module):
             if i ==0:
                 x_trans = x
         
-        x_long = self.LongMOE(x_trans)
+        x_long, router_logits = self.LongMOE(x_trans)
+        x_long = x_long.reshape(B, M, x_long.shape[-2], x_long.shape[-1])
+        x_long = x_long.permute(0, 1, 3, 2)
+
+
         
+        # TODO：后续把TCN和Transformer的输出结合起来，重写FlattenHead层，把MOE纳入损失函数考虑范围。
         # 3.进入FlattenHead层
-        x = self.head(x)
+        x = self.head(x, x_long)
 
         # 4.反归一化
         if self.revin:
             x = x.permute(0, 2, 1)
             x = self.revin_layer(x, 'denorm')
             x = x.permute(0, 2, 1)
-        return x
+
+        moe_loss = load_balancing_loss_func(router_logits, top_k=self.top_k, num_experts=self.num_experts)
+        return x, moe_loss
 
 
     
@@ -322,10 +329,10 @@ class Model(nn.Module):
     def forward(self, x , x_mark, dec_inp, batch_y_mark):
 
         x = x.permute(0, 2, 1)
-        x = self.model(x)
+        x, moe_loss = self.model(x)
         x = x.permute(0, 2, 1)
 
-        return x
+        return x, moe_loss
 
 
 

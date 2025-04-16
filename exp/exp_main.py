@@ -68,6 +68,8 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
+                elif 'MTSN' in self.args.model:
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -128,19 +130,23 @@ class Exp_Main(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float() # decoder没法知道未来序列的真实值，因此需要基于前label_len个真实值来预测未来序列，未来pre_len用0代替
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device) # 当前的参属下label_len是0，所以dec_inp就是batch_y
 
+                moe_loss = 0.0
                 # encoder - decoder
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
+                elif 'MTSN' in self.args.model:
+                    outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
                     else:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
 
-                loss = criterion(outputs, batch_y)
+                loss = criterion(outputs, batch_y) + moe_loss*self.args.moe_loss_weight
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -219,6 +225,8 @@ class Exp_Main(Exp_Basic):
                 if 'TST' in self.args.model:
                     # 如果模型类型中包含'Linear'或'TST'，则直接调用模型的前向传播函数
                     outputs = self.model(batch_x)
+                elif 'MTSN' in self.args.model:
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         # 如果输出注意力权重，则调用模型的前向传播函数，并获取输出和注意力权重
@@ -297,6 +305,8 @@ class Exp_Main(Exp_Basic):
                 # encoder - decoder
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
+                elif 'MTSN' in self.args.model:
+                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
