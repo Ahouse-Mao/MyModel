@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from layers.MTSN_long import MTSN_long
+from layers.MTSN_long2 import MTSN_long_without_moe
 from layers.MTSN_short import MTSN_short
 import torch.nn.functional as F
 from layers.MTSN_layers2 import LayerNorm
@@ -138,14 +139,14 @@ class MTSN(nn.Module):
     """
     
     def __init__(self,
-                top_k, num_experts, # moe参数
+                top_k, num_experts, use_moe,# moe参数
                 n_layers, n_heads, d_ff, # transformer参数
                 dims, patch_size, patch_stride,  downsample_ratio, # stem和downsample参数
                 num_blocks, ffn_ratio, large_size, small_size, dw_dims, nvars, # block参数
                 seq_len, individual=False, target_window=96, head_dropout=0.1, # head参数
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
-                revin=True, affine=True, subtract_last=False # RevIN参数
+                revin=True, affine=True, subtract_last=False,# RevIN参数
                 
                 ): 
         self.nvars = nvars # 变量个数
@@ -153,6 +154,7 @@ class MTSN(nn.Module):
         self.target_window = target_window
         self.top_k = top_k
         self.num_experts = num_experts
+        self.use_moe = use_moe
 
 
         
@@ -190,10 +192,17 @@ class MTSN(nn.Module):
 
         # 定义MTSN_LongMOE
         self.patch_num = (seq_len + patch_size - patch_stride - patch_size) // patch_stride + 1 # 修改了一下patch_num的计算方式
-        self.LongMOE = MTSNMoeSparseExpertsLayer( patch_num=self.patch_num, patch_len=patch_size, c_in=nvars,
-                                                  top_k=top_k, num_experts=num_experts, hidden_size=dims*self.patch_num, # 修改hidden_size的计算方式，从dims变为dims*nvars
-                                                  n_layers=n_layers, d_model=dims, n_heads=n_heads, d_ff=d_ff
-                                                ) 
+        if self.use_moe:
+            self.LongMOE = MTSNMoeSparseExpertsLayer( patch_num=self.patch_num, patch_len=patch_size, c_in=nvars,
+                                                      top_k=top_k, num_experts=num_experts, hidden_size=dims*self.patch_num, # 修改hidden_size的计算方式，从dims变为dims*nvars
+                                                      n_layers=n_layers, d_model=dims, n_heads=n_heads, d_ff=d_ff
+                                                    )
+        else:
+            self.LongMOE = MTSN_long_without_moe(patch_len=patch_size, patch_num=self.patch_num, # patch参数
+                c_in=nvars,  
+                n_layers=n_layers, d_model=dims, n_heads=n_heads, d_k=None, d_v=None, d_ff=d_ff,
+                attn_dropout=0., dropout=0, act="gelu",
+                res_attention=True, pre_norm=False, store_attn=False,)
 
         # 定义flattenhead
         self.n_vars = nvars
@@ -242,12 +251,13 @@ class MTSN(nn.Module):
             
             if i ==0:
                 x_trans = x
+        if self.use_moe:
+            x_long, router_logits = self.LongMOE(x_trans)
+        else:
+            x_long = self.LongMOE(x_trans)
         
-        x_long, router_logits = self.LongMOE(x_trans)
         x_long = x_long.reshape(B, M, x_long.shape[-2], x_long.shape[-1])
         x_long = x_long.permute(0, 1, 3, 2)
-
-
         
         # TODO：后续把TCN和Transformer的输出结合起来，重写FlattenHead层，把MOE纳入损失函数考虑范围。
         # 3.进入FlattenHead层
@@ -259,8 +269,11 @@ class MTSN(nn.Module):
             x = self.revin_layer(x, 'denorm')
             x = x.permute(0, 2, 1)
 
-        moe_loss = load_balancing_loss_func(router_logits, top_k=self.top_k, num_experts=self.num_experts)
-        return x, moe_loss
+        if self.use_moe:
+            moe_loss = load_balancing_loss_func(router_logits, top_k=self.top_k, num_experts=self.num_experts)
+            return x, moe_loss
+        else:
+            return x
 
 
     
@@ -307,6 +320,7 @@ class Model(nn.Module):
         self.patch_stride = configs.patch_stride
 
         # MOE专家模型参数
+        self.use_moe = configs.use_moe
         self.top_k = configs.top_k
         self.num_experts = configs.num_experts
         self.ffn_ratio = configs.ffn_ratio
@@ -323,16 +337,22 @@ class Model(nn.Module):
                           dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
                           num_blocks=self.num_blocks, large_size=self.large_size, small_size=self.small_size, dw_dims=self.dw_dims, nvars=self.c_in,
                           seq_len=self.seq_len, individual=self.individual, target_window=self.target_window,
-                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff
+                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff, use_moe=self.use_moe
         )
     
     def forward(self, x , x_mark, dec_inp, batch_y_mark):
 
         x = x.permute(0, 2, 1)
-        x, moe_loss = self.model(x)
+        if self.use_moe:
+            x, moe_loss = self.model(x)
+        else:
+            x = self.model(x)
         x = x.permute(0, 2, 1)
 
-        return x, moe_loss
+        if self.use_moe:
+            return x, moe_loss
+        else:
+            return x
 
 
 

@@ -69,7 +69,10 @@ class Exp_Main(Exp_Basic):
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
                 elif 'MTSN' in self.args.model:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    if self.args.use_moe:
+                        outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -135,7 +138,10 @@ class Exp_Main(Exp_Basic):
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
                 elif 'MTSN' in self.args.model:
-                    outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    if self.args.use_moe:
+                        outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
@@ -226,7 +232,10 @@ class Exp_Main(Exp_Basic):
                     # 如果模型类型中包含'Linear'或'TST'，则直接调用模型的前向传播函数
                     outputs = self.model(batch_x)
                 elif 'MTSN' in self.args.model:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    if self.args.use_moe:
+                        outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         # 如果输出注意力权重，则调用模型的前向传播函数，并获取输出和注意力权重
@@ -306,7 +315,10 @@ class Exp_Main(Exp_Basic):
                 if 'TST' in self.args.model:
                     outputs = self.model(batch_x)
                 elif 'MTSN' in self.args.model:
-                    outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    if self.args.use_moe:
+                        outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                    else:
+                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     if self.args.output_attention:
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]

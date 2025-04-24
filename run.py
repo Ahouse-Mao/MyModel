@@ -39,6 +39,7 @@ parser.add_argument('--num_blocks', type=int, default=2, help='number of blocks'
 parser.add_argument('--top_k', type=int, default=2, help='top k')
 parser.add_argument('--num_experts', type=int, default=4, help='number of experts')
 parser.add_argument('--moe_loss_weight', type=float, default=0.4, help='moe loss weight')
+parser.add_argument('--use_moe', type=bool, default=False, help='use moe or not')
 
 
 # parser.add_argument('--patch_stride', type=int, default=4, help='patch stride')
@@ -88,7 +89,7 @@ parser.add_argument('--do_predict', action='store_true', help='whether to predic
 parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
 parser.add_argument('--itr', type=int, default=5, help='experiments times')
 parser.add_argument('--train_epochs', type=int, default=25, help='train epochs')
-parser.add_argument('--batch_size', type=int, default=20, help='batch size of train input data')
+parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
 parser.add_argument('--patience', type=int, default=5, help='early stopping patience')
 parser.add_argument('--learning_rate', type=float, default=0.001, help='optimizer learning rate')
 parser.add_argument('--des', type=str, default='test', help='exp description')
