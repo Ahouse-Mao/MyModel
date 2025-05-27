@@ -1,20 +1,26 @@
 import torch
 from torch import nn
-from typing import Optional, Tuple, List, Union
-
+from typing import Optional, Tuple, List, Union, Callable
+from torch import Tensor
 
 class Flatten_Head(nn.Module):
     """
     独立模式适用于变量差异大的情况(例如温度和压力传感器等),适用于多任务学习
     共享模式适用于变量相关性高,适用于单任务多变量预测
     变量数过多建议共享模式,变量数少可采用独立模式
+
+    5.21
+    新增了新增长时序和短时序的拼接模式
+    
     """
     # TODO：如果要独立处理，能否在这里进行并行化处理，提升处理速度？
-    def __init__(self, individual, n_vars, nf, target_window, head_dropout=0):
+    def __init__(self, individual, n_vars, nf, target_window, combie_mode, head_dropout=0):
         super(Flatten_Head, self).__init__()
 
         self.individual = individual # 是否独立处理每个变量
         self.n_vars = n_vars # 变量总数
+        self.combie_mode = combie_mode # 拼接模式
+
         if self.individual: # 独立处理模式
             self.linears = nn.ModuleList()
             self.dropouts = nn.ModuleList()
@@ -29,7 +35,12 @@ class Flatten_Head(nn.Module):
             self.dropout = nn.Dropout(head_dropout) # dropout层
 
     def forward(self, x, x_long):  # x: [bs x nvars x d_model x patch_num]
-        x = torch.concat((x, x_long), dim=-1) # 把长序列和短序列拼接在一起
+        # 新增长时序和短时序的拼接模式
+        if self.combie_mode == 'concat':
+            x = torch.concat((x, x_long), dim=-1) # 把长序列和短序列拼接在一起
+        elif self.combie_mode == 'add':
+            x = x + x_long # 把长序列和短序列相加在一起
+
         if self.individual: 
             x_out = []
             for i in range(self.n_vars):
@@ -230,3 +241,43 @@ def load_balancing_loss_func(
     overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(dim=0)) # 最终损失的计算通过广播机制实现
 
     return overall_loss * num_experts
+
+
+class FeatureAblation:
+    def __init__(self, forward_func: Callable):
+        self.forward_fuc = forward_func
+        self.use_weights = False
+
+    def attribute(
+            self,
+            inputs: Tensor,
+            baselines: Optional[Tensor] = None, # 基线参考值
+            feature_mask: Optional[Tensor] = None, # 特征掩码，指定哪些特征需扰动，默认每个patch为独立特征组
+            perturbations_per_eval: int = 1, # 每次前向传播扰动的特征数
+    ) -> Tensor:
+        
+        if baselines is None: # 如果没有提供基线参考值，则使用全零张量
+            baselines = torch.zeros_like(inputs)
+        
+        # 初始未扰动输出
+        initial_output = self.forward_fuc(inputs)
+        attributions = torch.zeros_like(inputs)
+
+        # 生成特征掩码(默认每个patch为独立的特征组)
+        if feature_mask is None:
+            B, M, D, N = inputs.shape
+            feature_mask = torch.arrange(N).expand(B, M, D, -1).to(inputs.device) # 每个patch作为独立特征
+
+        # 遍历每个特征组
+        unique_features = torch.unique(feature_mask)
+        for feat in unique_features:
+            mask = (feature_mask == feat)
+            # 扰动输入：替换为基线值
+            modified_input = inputs * (~mask) + baselines * mask
+            modified_output = self.forward_fuc(modified_input)
+            # 归因值 = 初始输出 - 扰动输出
+            diff = (initial_output - modified_output).unsqueeze(-1) # 扩展维度以广播
+            attributions += diff * mask # 累加到对应位置
+
+        return attributions
+

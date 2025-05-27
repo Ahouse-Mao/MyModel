@@ -139,6 +139,7 @@ class MTSN(nn.Module):
     """
     
     def __init__(self,
+                combie_mode, #long和short的组合模式
                 top_k, num_experts, use_moe,# moe参数
                 n_layers, n_heads, d_ff, # transformer参数
                 dims, patch_size, patch_stride,  downsample_ratio, # stem和downsample参数
@@ -147,7 +148,6 @@ class MTSN(nn.Module):
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
                 revin=True, affine=True, subtract_last=False,# RevIN参数
-                
                 ): 
         self.nvars = nvars # 变量个数
         self.patch_size = patch_size
@@ -207,15 +207,22 @@ class MTSN(nn.Module):
         # 定义flattenhead
         self.n_vars = nvars
         self.individual = individual
+        self.combie_mode = combie_mode
         d_model = dims
         # flattenhead层为了适应Transformer层的concat，需要修改下面的head_nf计算方式
-        if self.patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
-            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio,(self.num_stage - 1)) + self.patch_num)
-        else:
-            # 不能被整除的时候, 在MTSN的forward部分已经改变了patch方式，所以只需要向下整除然后+1即可。
-            self.head_nf = d_model * (self.patch_num // pow(downsample_ratio, (self.num_stage - 1))+1 + self.patch_num)    
+        if self.combie_mode == 'concat':
+            if self.patch_num % pow(downsample_ratio,(self.num_stage - 1)) == 0:
+                self.head_nf = d_model * (self.patch_num // pow(downsample_ratio,(self.num_stage - 1)) + self.patch_num)
+            else:
+                # 不能被整除的时候, 在MTSN的forward部分已经改变了patch方式，所以只需要向下整除然后+1即可。
+                self.head_nf = d_model * (self.patch_num // pow(downsample_ratio, (self.num_stage - 1))+1 + self.patch_num)
+        elif self.combie_mode == 'add':
+            self.head_nf = d_model * self.patch_num
+        if self.combie_mode == 'add':
+            self.linear_x_trans = nn.Linear(self.patch_num//2, self.patch_num)
+
         self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
-                                     head_dropout=head_dropout)
+                                     combie_mode, head_dropout=head_dropout)
     
     def forward(self, x):
         # 1.进入先进行RevIN
@@ -249,8 +256,13 @@ class MTSN(nn.Module):
             x = x.reshape(B, M, D_, N_)
             x = self.stages[i](x)
             
-            if i ==0:
+            if i == 0:
                 x_trans = x
+        
+        if self.combie_mode == 'add':
+            x = self.linear_x_trans(x)
+
+
         if self.use_moe:
             x_long, router_logits = self.LongMOE(x_trans)
         else:
@@ -327,6 +339,7 @@ class Model(nn.Module):
 
         # head参数
         self.head_dropout = configs.head_dropout
+        self.combie_mode = configs.combie_mode
 
         # Transformer参数
         self.n_layers = 3
@@ -337,7 +350,7 @@ class Model(nn.Module):
                           dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
                           num_blocks=self.num_blocks, large_size=self.large_size, small_size=self.small_size, dw_dims=self.dw_dims, nvars=self.c_in,
                           seq_len=self.seq_len, individual=self.individual, target_window=self.target_window,
-                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff, use_moe=self.use_moe
+                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff, use_moe=self.use_moe, combie_mode=self.combie_mode
         )
     
     def forward(self, x , x_mark, dec_inp, batch_y_mark):
