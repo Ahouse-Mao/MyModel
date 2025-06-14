@@ -148,6 +148,7 @@ class MTSN(nn.Module):
                 num_downsample = 3, # stem和downsample参数
                 small_kernel_merged=False, backbone_dropout=0.1, # block参数
                 revin=True, affine=True, subtract_last=False,# RevIN参数
+                use_feature_ablation=False,# feature ablation参数
                 ): 
         self.nvars = nvars # 变量个数
         self.patch_size = patch_size
@@ -155,7 +156,7 @@ class MTSN(nn.Module):
         self.top_k = top_k
         self.num_experts = num_experts
         self.use_moe = use_moe
-
+        self.use_feature_ablation = use_feature_ablation
 
         
         super(MTSN, self).__init__()
@@ -224,7 +225,7 @@ class MTSN(nn.Module):
         self.head = Flatten_Head(self.individual, self.n_vars, self.head_nf, target_window,
                                      combie_mode, head_dropout=head_dropout)
     
-    def forward(self, x):
+    def forward(self, x, feat_mask_id=None, fm=None):
         # 1.进入先进行RevIN
         if self.revin:
             x = x.permute(0, 2, 1)
@@ -233,8 +234,21 @@ class MTSN(nn.Module):
         
         # 2.准备进入embedding层及多尺度卷积层
         B,M,L = x.shape # B是batch size，M是变量个数，L是序列长度
+        
+        if fm != None: # 如果没有传入fm则说明目前还没有
+            if self.use_feature_ablation:
+                if not fm.train_mode:
+                    if fm.mode==1:
+                        x = fm.feature_weighting(x)
 
         x = x.unsqueeze(-2)
+
+        if fm != None: # 如果没有传入fm则说明目前还没有
+            if self.use_feature_ablation:
+                if fm.train_mode:
+                    if fm.mode==1:
+                        x = fm.mask_data(x, feat_mask_id)
+
         x_trans = torch.empty(0)
         for i in range(self.num_stage):
             B, M, D, N = x.shape # D是每个变量的通道个数，N是分patch后的patch个数
@@ -346,20 +360,24 @@ class Model(nn.Module):
         self.n_heads = 4
         self.d_ff = 256
 
+        # feature ablation参数
+        self.use_feature_ablation = configs.use_feature_ablation
+
         self.model = MTSN(top_k=self.top_k, num_experts=self.num_experts, ffn_ratio=self.ffn_ratio,
                           dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
                           num_blocks=self.num_blocks, large_size=self.large_size, small_size=self.small_size, dw_dims=self.dw_dims, nvars=self.c_in,
                           seq_len=self.seq_len, individual=self.individual, target_window=self.target_window,
-                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff, use_moe=self.use_moe, combie_mode=self.combie_mode
+                          n_layers= self.n_layers, n_heads=self.n_heads, d_ff=self.d_ff, use_moe=self.use_moe, combie_mode=self.combie_mode,
+                          use_feature_ablation=self.use_feature_ablation,
         )
     
-    def forward(self, x , x_mark, dec_inp, batch_y_mark):
+    def forward(self, x , x_mark, dec_inp, batch_y_mark, feat_mask_id=None, fm=None):
 
         x = x.permute(0, 2, 1)
         if self.use_moe:
-            x, moe_loss = self.model(x)
+            x, moe_loss = self.model(x, feat_mask_id, fm)
         else:
-            x = self.model(x)
+            x = self.model(x, feat_mask_id, fm)
         x = x.permute(0, 2, 1)
 
         if self.use_moe:

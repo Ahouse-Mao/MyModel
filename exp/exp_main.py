@@ -10,6 +10,7 @@ from exp.exp_basic import Exp_Basic
 from models import TPGN, iTransformer, ModernTCN, PatchTST, MTSN
 from utils.tools import EarlyStopping, adjust_learning_rate, visual, save_to_csv
 from utils.metrics import metric
+from layers.MTSN_feature_ablation_fcun import genertate_feature_ablation_mask
 
 warnings.filterwarnings('ignore')
 
@@ -112,15 +113,24 @@ class Exp_Main(Exp_Basic):
             scaler = torch.cuda.amp.GradScaler()
 
         epoch_time_all_list = [] # 记录每个epoch的运行时间
+        # TODO：思考一下fm的初始化应该放在哪里
+        fm = genertate_feature_ablation_mask(self.args, len(train_loader))
+        print("train_loader_len:")
+        print(len(train_loader))
+        fm.change_train_mode_0()
 
         for epoch in range(self.args.train_epochs):
+            # TODO：fm放到这里初始化的话每个epoch会有新的fm，但是考虑fm的延续性是否可以跨epoch传递信息？
             iter_count = 0
             train_loss = []
 
             self.model.train()
             # torch.autograd.set_detect_anomaly(True)
             epoch_time_start = time.time()
+
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+                # 更新batch_number参数
+                fm.update_batch_number(i)
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -135,24 +145,42 @@ class Exp_Main(Exp_Basic):
 
                 moe_loss = 0.0
                 # encoder - decoder
-                if 'TST' in self.args.model:
-                    outputs = self.model(batch_x)
-                elif 'MTSN' in self.args.model:
-                    if self.args.use_moe:
-                        outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+
+                if epoch==0: # 第一个epoch不加入fm
+                    if 'TST' in self.args.model:
+                        outputs = self.model(batch_x)
+                    elif 'MTSN' in self.args.model:
+                        if self.args.use_moe:
+                            outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        else:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                else:
-                    if self.args.output_attention:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        if self.args.output_attention:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                        else:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                else: # 第2个epoch开始加入
+                    if 'TST' in self.args.model:
+                        outputs = self.model(batch_x)
+                    elif 'MTSN' in self.args.model:
+                        if self.args.use_moe:
+                            outputs, moe_loss = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, fm)
+                        else:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, fm)
                     else:
-                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                        if self.args.output_attention:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, fm)[0]
+                        else:
+                            outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, fm)
                 
 
                 f_dim = -1 if self.args.features == 'MS' else 0
                 batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
-
-                loss = criterion(outputs, batch_y) + moe_loss*self.args.moe_loss_weight
+                
+                if self.args.use_feature_ablation_mode == 'loss_weighting': # TODO：没写完
+                    loss = criterion(outputs, batch_y) + moe_loss*self.args.moe_loss_weight
+                else:
+                    loss = criterion(outputs, batch_y) + moe_loss*self.args.moe_loss_weight
                 train_loss.append(loss.item())
 
                 if (i + 1) % 100 == 0:
@@ -172,6 +200,114 @@ class Exp_Main(Exp_Basic):
                     # with torch.autograd.detect_anomaly():
                     loss.backward()
                     model_optim.step()
+
+            # TODO：这里开始进行feature ablation
+            """
+            目前的想法是:
+            1.这里生成所需要的mask,并传递进去
+            2.传入的mask在patch工作做完后进行
+            3.这里主要是做推理工作,在MTSN代码中设置多分支,如果检测到feature ablation模式是否开启,若开启则mask
+            4.先实现batch_size, 每个变量级别的mask(即情况3)
+            
+            """
+            if self.args.use_feature_ablation:
+                self.model.eval()
+                fm.change_train_mode_1()
+                
+                with torch.no_grad():
+                    accumulated_batch_x = torch.empty(0)
+                    accumulated_batch_y = torch.empty(0)
+                    accumulated_batch_x_mark = torch.empty(0)
+                    accumulated_batch_y_mark = torch.empty(0)
+                    
+                    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+                        # 累积数据
+                        # 合并累积的batch数据（dim=0表示在batch维度拼接）
+                        if fm.tensor_is_empty(accumulated_batch_x):
+                            accumulated_batch_x = batch_x
+                            accumulated_batch_y = batch_y
+                            accumulated_batch_x_mark = batch_x_mark
+                            accumulated_batch_y_mark = batch_y_mark
+                        else:
+                            accumulated_batch_x = torch.cat([accumulated_batch_x, batch_x], dim=0)
+                            accumulated_batch_y = torch.cat([accumulated_batch_y, batch_y], dim=0)
+                            accumulated_batch_x_mark = torch.cat([accumulated_batch_x_mark, batch_x_mark], dim=0)
+                            accumulated_batch_y_mark = torch.cat([accumulated_batch_y_mark, batch_y_mark], dim=0)
+
+
+                        # 当累积了100个batch或到达最后一个batch时执行计算
+                        if (i + 1) % 10 == 0 or i == len(train_loader) - 1:
+                            print(i)
+                            batch_x = accumulated_batch_x
+                            batch_y = accumulated_batch_y
+                            batch_x_mark = accumulated_batch_x_mark
+                            batch_y_mark = accumulated_batch_y_mark
+
+                            # 记录开始时间
+                            start_time = time.time()
+                            
+                            # 执行feature ablation计算
+                            batch_x = batch_x.float().to(self.device)
+                            batch_y = batch_y.float().to(self.device)
+                            batch_x_mark = batch_x_mark.float().to(self.device)
+                            batch_y_mark = batch_y_mark.float().to(self.device)
+                            
+                            ablation_scores_part = fm.get_scores_tensor_part() # 每次循环都会使用一个part来暂存结果, 形状是(Batch_size, n_vars)
+
+                            # decoder input
+                            dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float() # decoder没法知道未来序列的真实值，因此需要基于前label_len个真实值来预测未来序列，未来pre_len用0代替
+                            dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device) # 当前的参属下label_len是0，所以dec_inp就是batch_y
+                            
+                            # 计算原始输入得到的输出
+                            if 'TST' in self.args.model:
+                                ori_output = self.model(batch_x)
+                            elif 'MTSN' in self.args.model:
+                                if self.args.use_moe:
+                                    ori_output, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                                else:
+                                    ori_output = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            else:
+                                if self.args.output_attention:
+                                    ori_output = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)[0]
+                                else:
+                                    ori_output = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
+                            
+
+                            for j in range(fm.abla_range):                              
+                                
+                                # 计算mask后的输出
+                                if 'TST' in self.args.model:
+                                    outputs = self.model(batch_x)
+                                elif 'MTSN' in self.args.model:
+                                    if self.args.use_moe:
+                                        outputs, _ = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, feat_mask_id=j, fm=fm)
+                                    else:
+                                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, feat_mask_id=j, fm=fm)
+                                else:
+                                    if self.args.output_attention:
+                                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, feat_mask_id=j, fm=fm)[0]
+                                    else:
+                                        outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark, feat_mask_id=j, fm=fm)
+                                
+                                ablation_scores_part = fm.diff_caculation(ablation_scores_part, ori_output, outputs, j) # ablation_scores_part形状应为(batch_size, n_vars)
+
+                            # 清空累积的数据
+                            accumulated_batch_x = torch.empty(0)
+                            accumulated_batch_y = torch.empty(0)
+                            accumulated_batch_x_mark = torch.empty(0)
+                            accumulated_batch_y_mark = torch.empty(0)
+
+                            fm.add_part(ablation_scores_part, i)
+
+                            # 计算并打印耗时
+                            elapsed = time.time() - start_time
+                            print(f"Feature ablation计算耗时: {elapsed:.4f}秒")
+                        
+                fm.scores_norm() # normalize 以防止极值出现
+                
+
+                            
+                    
             
             epoch_time_end = time.time()
             epoch_time_all = epoch_time_end - epoch_time_start

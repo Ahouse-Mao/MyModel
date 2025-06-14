@@ -39,11 +39,21 @@ parser.add_argument('--num_blocks', type=int, default=2, help='number of blocks'
 parser.add_argument('--top_k', type=int, default=2, help='top k')
 parser.add_argument('--num_experts', type=int, default=4, help='number of experts')
 parser.add_argument('--moe_loss_weight', type=float, default=0.4, help='moe loss weight')
-parser.add_argument('--use_moe', type=bool, default=True, help='use moe or not')
+parser.add_argument('--use_moe', type=bool, default=False, help='use moe or not')
 
 parser.add_argument('--save_npy', type=bool, default=False, help='save npy or not')
 
 parser.add_argument('--combie_mode', type=str, default='add', help='combie mode, options: [add, concat]')
+
+# feature ablation config
+parser.add_argument('--use_feature_ablation', type=bool, default=True, help='use feature ablation or not')
+parser.add_argument('--feature_ablation_mode',type=int, default=1, help='feature ablation mode, options: [1, 2, 3],' \
+'1 means evry variate, every channel, every patch'
+'2 means evry variate, every patch'
+'3 means evry variate')
+parser.add_argument('--caculate_mode', type=int, default=1, help='caculate mode, options: [1, 2], 余弦相似度和MSE')
+parser.add_argument('--use_feature_ablation_mode', type=str, default='feature_weighting', help='use feature ablation mode, options: [feature_weighting, loss_weighting, attention_integration, feature_mask, regularization]')
+
 
 # parser.add_argument('--patch_stride', type=int, default=4, help='patch stride')
 
@@ -51,7 +61,7 @@ parser.add_argument('--combie_mode', type=str, default='add', help='combie mode,
 parser.add_argument('--data', type=str, default='electricity', help='dataset type')
 parser.add_argument('--root_path', type=str, default='/home/wms/South/TPGN/Dataset/', help='root path of the data file')
 parser.add_argument('--data_path', type=str, default='electricity.csv', help='data file')
-parser.add_argument('--features', type=str, default='MS', # 预测模式，S表示单变量预测单变量，M表示多变量预测多变量，MS表示多变量预测单变量
+parser.add_argument('--features', type=str, default='M', # 预测模式，S表示单变量预测单变量，M表示多变量预测多变量，MS表示多变量预测单变量
                     help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, ' 
                             'S:univariate predict univariate, MS:multivariate predict univariate')
 parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
