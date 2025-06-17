@@ -27,7 +27,7 @@ parser = argparse.ArgumentParser(description='Models for Long-range Time Series 
 # basic config
 parser.add_argument('--is_training', type=int, default=1, help='status')
 parser.add_argument('--task_id', type=str, default='test', help='task id')
-parser.add_argument('--model', type=str, default='MTSN',
+parser.add_argument('--model', type=str, default='MTSN_slim',
     help='model name, options: [TPGN, iTransformer, TimeMixer, FITS, ModernTCN, PDF, \
     WITRAN, CrossGNN, FourierGNN, Basisformer, \
     MICN, TimesNet, PatchTST, DLinear, NLinear, Linear, \
@@ -37,15 +37,16 @@ parser.add_argument('--model', type=str, default='MTSN',
 parser.add_argument('--num_blocks', type=int, default=2, help='number of blocks')
 parser.add_argument('--top_k', type=int, default=2, help='top k')
 parser.add_argument('--num_experts', type=int, default=4, help='number of experts')
-parser.add_argument('--moe_loss_weight', type=float, default=0.1, help='moe loss weight')
-parser.add_argument('--use_moe', type=bool, default=False, help='use moe or not')
+parser.add_argument('--moe_loss_factor', type=float, default=0.4, help='moe loss weight')
+parser.add_argument('--hidden_act', type=str, default='gelu', help='activation function')
+parser.add_argument('--use_moe', type=bool, default=True, help='use moe or not')
 
 parser.add_argument('--save_npy', type=bool, default=False, help='save npy or not')
 
 parser.add_argument('--combie_mode', type=str, default='add', help='combie mode, options: [add, concat]')
 
 # feature ablation config
-parser.add_argument('--use_feature_ablation', type=bool, default=True, help='use feature ablation or not')
+parser.add_argument('--use_feature_ablation', type=bool, default=False, help='use feature ablation or not')
 parser.add_argument('--feature_ablation_mode',type=int, default=1, help='feature ablation mode, options: [1, 2, 3],' \
 '1 means evry variate, every channel, every patch'
 '2 means evry variate, every patch'
@@ -81,16 +82,16 @@ parser.add_argument('--enc_in', type=int, default=321, help='encoder input size'
 parser.add_argument('--dec_in', type=int, default=321, help='decoder input size')
 parser.add_argument('--c_out', type=int, default=1, help='output size')
 parser.add_argument('--d_model', type=int, default=32, help='dimension of model')
-parser.add_argument('--n_heads', type=int, default=4, help='num of heads, no use for TPGMNN')
-parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers, no use for TPGMNN')
-parser.add_argument('--d_layers', type=int, default=2, help='num of decoder layers, , no use for TPGMNN')
+parser.add_argument('--n_heads', type=int, default=16, help='num of heads, no use for TPGMNN')
+parser.add_argument('--e_layers', type=int, default=3, help='num of encoder layers, no use for TPGMNN')
+parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers, , no use for TPGMNN')
 parser.add_argument('--d_ff', type=int, default=0, help='dimension of fcn, no use for TPGMNN')
 parser.add_argument('--moving_avg', default=25, help='window size of moving average')
 parser.add_argument('--factor', type=int, default=1, help='attn factor')
 parser.add_argument('--distil', action='store_false',
                     help='whether to use distilling in encoder, using this argument means not using distilling',
                     default=True)
-parser.add_argument('--dropout', type=float, default=0.05, help='dropout')
+parser.add_argument('--dropout', type=float, default=0.2, help='dropout')
 parser.add_argument('--embed', type=str, default='timeF',
                     help='time features encoding, options:[timeF, fixed, learned]')
 parser.add_argument('--activation', type=str, default='gelu', help='activation')
@@ -116,7 +117,7 @@ parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple g
 parser.add_argument('--devices', type=str, default='0,1', help='device ids of multi gpus')
 
 # For PatchTST
-parser.add_argument('--fc_dropout', type=float, default=0.05, help='fully connected dropout')
+parser.add_argument('--fc_dropout', type=float, default=0.2, help='fully connected dropout')
 parser.add_argument('--head_dropout', type=float, default=0.0, help='head dropout')
 parser.add_argument('--patch_len', type=int, default=16, help='patch length')
 parser.add_argument('--stride', type=int, default=8, help='stride')
@@ -136,7 +137,7 @@ parser.add_argument('--stem_ratio', type=int, default=6, help='stem ratio')
 parser.add_argument('--downsample_ratio', type=int, default=2, help='downsample_ratio')
 parser.add_argument('--ffn_ratio', type=int, default=8, help='ffn_ratio')
 
-parser.add_argument('--patch_size', type=int, default=8, help='the patch size')
+parser.add_argument('--patch_size', type=int, default=8, help='the patch size') # 修改为16和8试试
 parser.add_argument('--patch_stride', type=int, default=4, help='the patch stride')
 
 parser.add_argument('--large_size', nargs='+',type=int, default=51, help='big kernel size')
