@@ -227,13 +227,12 @@ class Model(nn.Module):
         self.combie_mode = configs.combie_mode
 
         # Transformer参数
-        self.n_layers = 3
-        self.n_heads = 16
-        self.d_ff = 32 # 注意这个参数和configs.d_model等价，涉及修改d_model时该参数一并修改
+        self.n_layers = configs.e_layers # Transformer的层数
+        self.n_heads = configs.n_heads # Transformer的头数
+        self.d_ff = configs.d_model # 注意这个参数和configs.d_model等价，涉及修改d_model时该参数一并修改
 
         self.TST_dropout = configs.dropout
         self.fc_dropout = configs.fc_dropout
-        self.head_dropout = configs.head_dropout
 
         self.model = MTSN_slim(top_k=self.top_k, num_experts=self.num_experts, ffn_ratio=self.ffn_ratio,
                           dims=self.dims, patch_size=self.patch_size, patch_stride=self.patch_stride, downsample_ratio=self.downsample_ratio,
