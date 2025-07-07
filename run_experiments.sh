@@ -12,12 +12,12 @@ mkdir -p experiments_results
 mkdir -p logs
 
 # 定义要测试的参数数组
-learning_rates=(0.0001 0.00005)
-d_models=(8 16)
-n_heads=(4 8)
-e_layers=(1 2)
-seq_lens=(168)
-pred_lens=(168)
+learning_rates=(0.00005)
+d_models=(16)
+n_heads=(8)
+e_layers=(3)
+seq_lens=(336)
+pred_lens=(92)
 
 # 计算总实验数量
 total_experiments=$((${#learning_rates[@]} * ${#d_models[@]} * ${#n_heads[@]} * ${#e_layers[@]} * ${#seq_lens[@]} * ${#pred_lens[@]}))
@@ -61,6 +61,7 @@ for lr in "${learning_rates[@]}"; do
                             --pred_len $pl \
                             --train_epochs 10 \
                             --patience 3 \
+                            --batch_size 16 \
                             --des "batch_exp_${current_experiment}"
                         
                         # 记录实验结果

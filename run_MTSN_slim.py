@@ -2,13 +2,13 @@ import argparse
 import os
 import sys
 import logging
-import datetime
+from datetime import datetime
 sys.path.append('/home/wms/South/TPGN-main/models')
 sys.path.append('/home/wms/South/TPGN-main/layers')
 sys.path.append('/home/wms/South/TPGN-main/utils')
 from utils.Mypydebug import show_shape
 
-show_shape()
+show_shape()  # 注释掉这个调用，可能导致重复输出问题
 
 import torch
 from exp.exp_main import Exp_Main
@@ -16,56 +16,54 @@ import random
 import numpy as np
 from utils.str2bool import str2bool
 
+# TeeOutput类已移除，使用标准logging模块代替
+
 class TeeOutput:
-    """同时输出到控制台和文件的类"""
-    def __init__(self, file_handle, original_stream):
-        self.file_handle = file_handle
-        self.original_stream = original_stream
-
+    def __init__(self, *files):
+        self.files = files
+        self.last_data = None
+    
     def write(self, data):
-        self.file_handle.write(data)
-        self.file_handle.flush()  # 确保实时写入
-        self.original_stream.write(data)
-        self.original_stream.flush()
-
+        # 检查是否为空或与上次写入的数据相同
+        if data and data != self.last_data:
+            for file in self.files:
+                file.write(data)
+                file.flush()
+            self.last_data = data
+    
     def flush(self):
-        self.file_handle.flush()
-        self.original_stream.flush()
+        for file in self.files:
+            file.flush()
 
 def setup_logging_redirect(args):
-    """设置完整的输出重定向到日志文件"""
-    # 创建logs目录
-    os.makedirs('./logs', exist_ok=True)
+    # 创建日志目录
+    log_dir = './logs/'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
     
-    # 生成日志文件名，包含关键参数
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_filename = f'logs/MTSN_slim_lr{args.learning_rate}_dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_sl{args.seq_len}_pl{args.pred_len}_{timestamp}.log'
+    # 生成日志文件名
+    log_filename = f"MTSN_slim_lr{args.learning_rate}_dm{args.d_model}_nh{args.n_heads}_el{args.e_layers}_sl{args.seq_len}_pl{args.pred_len}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    log_path = os.path.join(log_dir, log_filename)
     
     # 打开日志文件
-    log_file = open(log_filename, 'w', encoding='utf-8')
+    log_file = open(log_path, 'w', encoding='utf-8')
     
     # 保存原始的stdout和stderr
     original_stdout = sys.stdout
     original_stderr = sys.stderr
     
-    # 设置重定向
-    sys.stdout = TeeOutput(log_file, original_stdout)
-    sys.stderr = TeeOutput(log_file, original_stderr)
+    # 创建TeeOutput对象，同时输出到控制台和文件
+    tee_stdout = TeeOutput(original_stdout, log_file)
+    tee_stderr = TeeOutput(original_stderr, log_file)
     
-    # 输出实验开始信息
-    print("="*80)
-    print("         MTSN_slim 实验开始")
-    print("="*80)
-    print("关键实验参数:")
-    print(f"  Learning Rate:    {args.learning_rate}")
-    print(f"  Model Dimension:  {args.d_model}")
-    print(f"  Attention Heads:  {args.n_heads}")
-    print(f"  Encoder Layers:   {args.e_layers}")
-    print(f"  Sequence Length:  {args.seq_len}")
-    print(f"  Prediction Length:{args.pred_len}")
-    print("="*80)
+    # 重定向stdout和stderr
+    sys.stdout = tee_stdout
+    sys.stderr = tee_stderr
     
-    return log_file, log_filename, original_stdout, original_stderr
+    print(f"实验开始: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"日志文件: {log_path}")
+    
+    return log_file, original_stdout, original_stderr
 
 current_directory = os.getcwd()
 print(current_directory)
@@ -214,8 +212,8 @@ if args.use_gpu and args.use_multi_gpu:
     args.device_ids = [int(id_) for id_ in device_ids]
     args.gpu = args.device_ids[0]
 
-# 设置输出重定向到日志文件
-log_file_handle, log_filename, original_stdout, original_stderr = setup_logging_redirect(args)
+# 设置日志记录
+log_file, original_stdout, original_stderr = setup_logging_redirect(args)
 
 print('完整实验参数配置:')
 print(str(args))
@@ -279,20 +277,15 @@ if args.is_training:
         
         # 记录实验完成信息
         print("="*80)
-        print("实验完成！日志文件保存在: {}".format(log_filename))
+        print("实验完成！")
         print("="*80)
 
         
         torch.cuda.empty_cache()
         
-    # 恢复原始的stdout和stderr，关闭日志文件
-    sys.stdout = original_stdout
-    sys.stderr = original_stderr
-    log_file_handle.close()
-        
 else:
     ii = 0
-    setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(args.model_id,
+    setting = '{}_{}_{}_ft{}_sl{}_ll{}_pl{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(args.task_id,
                                                                                                     model_flag,
                                                                                                     args.data,
                                                                                                     args.features,
@@ -311,6 +304,15 @@ else:
     
     exp = Exp(args)  # set experiments
     print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-    exp.test(setting, test=1)
+    exp.test(setting, test=1, train_time=0)
     
     torch.cuda.empty_cache()
+
+# 恢复原始的stdout和stderr
+sys.stdout = original_stdout
+sys.stderr = original_stderr
+
+# 关闭日志文件
+log_file.close()
+
+print(f"实验完成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
