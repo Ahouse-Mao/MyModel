@@ -12,6 +12,9 @@
 /result.txt
 /test_results
 /logs
+*.pyc
+*.csv
+*.npy
 
 
 
